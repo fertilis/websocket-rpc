@@ -1,13 +1,12 @@
 use anyhow::anyhow;
-use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{poll, SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::pin::Pin;
+use std::task::Poll;
 use websocket_lite::{ClientBuilder, Opcode};
 
 use crate::agent_id::AgentId;
 use crate::message::Message;
-use crate::message_header::MessageHeader;
 
 /// Communicates to the [Router]
 pub struct Agent {
@@ -31,15 +30,15 @@ impl Agent {
     }
 
     pub fn push(self: &Pin<Box<Self>>, message: Message) {
-        self.static_mut().inbound_queue.push_back(message);
+        self.static_mut().outbound_queue.push_back(message);
     }
 
     pub fn pop(self: &Pin<Box<Self>>) -> Option<Message> {
-        self.static_mut().outbound_queue.pop_front()
+        self.static_mut().inbound_queue.pop_front()
     }
 
     pub fn peek<'a>(self: &'a Pin<Box<Self>>) -> Option<&'a Message> {
-        self.static_mut().outbound_queue.front()
+        self.static_mut().inbound_queue.front()
     }
 
     pub fn run_as_task(self: &Pin<Box<Self>>) {
@@ -68,40 +67,44 @@ impl Agent {
             .async_connect()
             .await
             .map_err(|e| anyhow!("connect failed: {}", e))?;
+        log::info!("Connected");
 
         loop {
-            let message = match client.next().await {
-                None => {
+            match poll!(client.next()) {
+                Poll::Pending => {}
+                Poll::Ready(None) => {
                     log::debug!("msg read got None");
                     return Ok(());
                 }
-                Some(message_res) => message_res.map_err(|e| anyhow!("read failed: {}", e))?,
-            };
-            match message.opcode() {
-                Opcode::Text => {}
-                Opcode::Binary => {
-                    let message: Bytes = message.into_data();
-                    let message: &[u8] = message.as_ref();
-                    if message.len() > MessageHeader::SIZE {
-                        let message_header: &MessageHeader =
-                            unsafe { &*(message.as_ptr() as *const MessageHeader) };
-                        let message_body: Vec<u8> = message[MessageHeader::SIZE..].to_vec();
-                        let message: Message = Message {
-                            header: message_header.clone(),
-                            body: message_body,
-                        };
-                        self.outbound_queue.push_back(message);
+                Poll::Ready(Some(Err(e))) => {
+                    return Err(anyhow!("read failed: {}", e));
+                }
+                Poll::Ready(Some(Ok(message))) => match message.opcode() {
+                    Opcode::Text => {}
+                    Opcode::Binary => {
+                        if let Ok(message) = Message::try_from(message.into_data().as_ref()) {
+                            self.inbound_queue.push_back(message);
+                        }
                     }
-                }
-                Opcode::Ping => {
-                    client
-                        .send(websocket_lite::Message::pong(message.into_data()))
-                        .await
-                        .map_err(|e| anyhow!("send failed: {}", e))?;
-                }
-                Opcode::Close => return Ok(()),
-                Opcode::Pong => {}
+                    Opcode::Ping => {
+                        client
+                            .send(websocket_lite::Message::pong(message.into_data()))
+                            .await
+                            .map_err(|e| anyhow!("send failed: {}", e))?;
+                    }
+                    Opcode::Close => return Ok(()),
+                    Opcode::Pong => {}
+                },
             }
+            while let Some(message) = self.outbound_queue.pop_front() {
+                log::debug!("Sending message: {:?}", message);
+                client
+                    .send(websocket_lite::Message::binary(message.as_ref().to_vec()))
+                    .await
+                    .map_err(|e| anyhow!("send failed: {}", e))?;
+                log::debug!("Sent");
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
     }
 }

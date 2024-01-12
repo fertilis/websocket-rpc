@@ -1,11 +1,15 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use futures_util::{poll, SinkExt};
 use std::pin::Pin;
 use std::task::Poll;
 use tokio::net::TcpStream;
 use tokio::time::Instant;
-use tokio_websockets::{Message, ServerBuilder, WebsocketStream};
+use tokio_websockets::{Message as TokioMessage, ServerBuilder, WebsocketStream};
+
+use crate::agent_id::AgentId;
+use crate::message::Message;
+use crate::message_queues::MessageQueues;
 
 /// Websocket server:
 /// 1. Accepts connections from [Agent]s
@@ -13,6 +17,7 @@ use tokio_websockets::{Message, ServerBuilder, WebsocketStream};
 /// 3. Writes messages to receiving [Agent]s
 pub struct Router {
     port: u16,
+    message_queues: MessageQueues,
     _pin: std::marker::PhantomPinned,
 }
 
@@ -20,9 +25,15 @@ impl Router {
     pub fn new(port: u16) -> Pin<Box<Self>> {
         let object = Router {
             port,
+            message_queues: MessageQueues::new(),
             _pin: std::marker::PhantomPinned,
         };
         Box::pin(object)
+    }
+
+    pub async fn run_forever(self: &Pin<Box<Self>>) {
+        let worker: &'static mut Self = self.static_mut();
+        worker.run().await;
     }
 
     pub fn run_as_task(self: &Pin<Box<Self>>) {
@@ -50,9 +61,9 @@ impl Router {
     }
 
     async fn run_until_error(&mut self) -> anyhow::Result<()> {
-        println!("Listening on port {}", self.port);
-        let addr = format!("127.0.0.1:{}", self.port);
+        let addr = format!("0.0.0.0:{}", self.port);
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        log::info!("Listening on: {}", listener.local_addr()?);
         while let Ok((stream, client_address)) = listener.accept().await {
             let ws_stream: WebsocketStream<TcpStream> = ServerBuilder::new().accept(stream).await?;
             let client_address: String = client_address.to_string();
@@ -72,17 +83,27 @@ impl Router {
         client_address: String,
     ) -> anyhow::Result<()> {
         log::info!("Client connected: {}", client_address);
+        let mut agent_id: Option<AgentId> = None;
         let mut last_ping: Instant = Instant::now();
         loop {
             match poll!(ws_stream.next()) {
-                Poll::Ready(Some(Ok(_message))) => {
-                    todo!()
-                    // if message.is_text() {
-                    //     let message: &str = message.as_text().unwrap();
-                    //     if let Err(_) = handle_inbound_message(state, message, &client_address) {
-                    //         log::error!("Invalid inbound message: {}", message);
-                    //     }
-                    // }
+                Poll::Ready(Some(Ok(message))) => {
+                    if message.is_binary() {
+                        let payload: Bytes = message.into_payload();
+                        let payload: &[u8] = payload.as_ref();
+                        println!("payload size: {}", payload.len());
+                        println!("payload: {:?}", payload);
+                        if let Ok(message) = Message::try_from(payload) {
+                            if message.is_handshake() {
+                                agent_id = Some(message.header.src_agent_id);
+                                log::info!("Got handshake from: {}", agent_id.unwrap().0);
+                                log::debug!("Handshake: {:?}", &message);
+                            } else {
+                                log::debug!("Got message: {:?}", &message);
+                                self.message_queues.push(message);
+                            }
+                        }
+                    }
                 }
                 Poll::Ready(None) => {
                     log::info!("Client disconnected");
@@ -94,10 +115,20 @@ impl Router {
                 }
                 Poll::Pending => (),
             }
-
+            match agent_id {
+                None => (),
+                Some(agent_id) => {
+                    while let Some(message) = self.message_queues.pop(agent_id) {
+                        ws_stream
+                            .send(TokioMessage::binary(BytesMut::from(message.as_ref())))
+                            .await?;
+                        log::debug!("Sent message to: {}", agent_id.0);
+                    }
+                }
+            }
             let since_last_ping: tokio::time::Duration = last_ping.elapsed();
             if since_last_ping.as_secs() > 5 {
-                ws_stream.send(Message::ping(BytesMut::new())).await?;
+                ws_stream.send(TokioMessage::ping(BytesMut::new())).await?;
                 last_ping = Instant::now();
                 continue;
             }
