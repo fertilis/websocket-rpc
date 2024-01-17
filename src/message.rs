@@ -9,14 +9,11 @@ pub struct Message {
     pub body: Vec<u8>,
 }
 
-impl AsRef<[u8]> for Message {
-    fn as_ref(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self as *const Self as *const u8,
-                std::mem::size_of::<Self>(),
-            )
-        }
+impl Into<Vec<u8>> for Message {
+    fn into(self) -> Vec<u8> {
+        let mut bytes: Vec<u8> = self.header.into();
+        bytes.extend(self.body);
+        bytes
     }
 }
 

@@ -82,7 +82,7 @@ impl Router {
         mut ws_stream: WebsocketStream<TcpStream>,
         client_address: String,
     ) -> anyhow::Result<()> {
-        log::info!("Client connected: {}", client_address);
+        log::debug!("Client connected: {}", client_address);
         let mut agent_id: Option<AgentId> = None;
         let mut last_ping: Instant = Instant::now();
         loop {
@@ -91,12 +91,10 @@ impl Router {
                     if message.is_binary() {
                         let payload: Bytes = message.into_payload();
                         let payload: &[u8] = payload.as_ref();
-                        println!("payload size: {}", payload.len());
-                        println!("payload: {:?}", payload);
                         if let Ok(message) = Message::try_from(payload) {
                             if message.is_handshake() {
                                 agent_id = Some(message.header.src_agent_id);
-                                log::info!("Got handshake from: {}", agent_id.unwrap().0);
+                                log::debug!("Got handshake from: {}", agent_id.unwrap().0);
                                 log::debug!("Handshake: {:?}", &message);
                             } else {
                                 log::debug!("Got message: {:?}", &message);
@@ -106,7 +104,7 @@ impl Router {
                     }
                 }
                 Poll::Ready(None) => {
-                    log::info!("Client disconnected");
+                    log::debug!("Client disconnected");
                     break;
                 }
                 Poll::Ready(Some(Err(e))) => {
@@ -119,8 +117,11 @@ impl Router {
                 None => (),
                 Some(agent_id) => {
                     while let Some(message) = self.message_queues.pop(agent_id) {
+                        let message_bytes: Vec<u8> = message.into();
                         ws_stream
-                            .send(TokioMessage::binary(BytesMut::from(message.as_ref())))
+                            .send(TokioMessage::binary(BytesMut::from(
+                                message_bytes.as_slice(),
+                            )))
                             .await?;
                         log::debug!("Sent message to: {}", agent_id.0);
                     }

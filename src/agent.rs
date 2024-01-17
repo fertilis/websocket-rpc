@@ -62,12 +62,12 @@ impl Agent {
     }
 
     async fn run_until_error(&mut self) -> anyhow::Result<()> {
-        log::info!("Connecting to: {}", self.router_url);
+        log::debug!("Connecting to: {}", self.router_url);
         let mut client = ClientBuilder::new(&self.router_url)?
             .async_connect()
             .await
             .map_err(|e| anyhow!("connect failed: {}", e))?;
-        log::info!("Connected");
+        log::debug!("Connected");
 
         loop {
             match poll!(client.next()) {
@@ -98,8 +98,9 @@ impl Agent {
             }
             while let Some(message) = self.outbound_queue.pop_front() {
                 log::debug!("Sending message: {:?}", message);
+                let message_bytes: Vec<u8> = message.into();
                 client
-                    .send(websocket_lite::Message::binary(message.as_ref().to_vec()))
+                    .send(websocket_lite::Message::binary(message_bytes))
                     .await
                     .map_err(|e| anyhow!("send failed: {}", e))?;
                 log::debug!("Sent");

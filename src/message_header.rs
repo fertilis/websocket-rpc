@@ -15,6 +15,18 @@ impl MessageHeader {
     pub const SIZE: usize = std::mem::size_of::<MessageHeader>();
 }
 
+impl Into<Vec<u8>> for MessageHeader {
+    fn into(self) -> Vec<u8> {
+        unsafe {
+            std::slice::from_raw_parts(
+                &self as *const Self as *const u8,
+                std::mem::size_of::<Self>(),
+            )
+        }
+        .to_vec()
+    }
+}
+
 impl TryFrom<&[u8]> for MessageHeader {
     type Error = anyhow::Error;
 

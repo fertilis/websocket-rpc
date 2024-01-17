@@ -1,5 +1,5 @@
 use clap::Parser;
-use ws_rpc::{init_logger, Agent, AgentId, Message, MessageHeader};
+use ws_rpc::{init_logger, Agent, AgentId, Message, MessageHeader, RequestId};
 
 #[derive(Debug, Parser)]
 #[clap(name = "server_example")]
@@ -23,12 +23,24 @@ fn main() {
 }
 
 async fn main_a() {
-    init_logger(vec!["ws_rpc".to_string()], "Debug");
+    init_logger(
+        vec!["ws_rpc".to_string(), "server_example".to_string()],
+        "Debug",
+    );
     let args = Args::parse();
     let agent_id = AgentId(args.agent_id);
     let agent = Agent::new(agent_id, &args.router_url);
     agent.run_as_task();
-    println!("Server with agent_id {} is running", agent_id.0);
+    log::info!("Server with agent_id {} is running", agent_id.0);
+    let handshake_message = Message {
+        header: MessageHeader {
+            src_agent_id: agent_id,
+            dst_agent_id: AgentId(0),
+            request_id: RequestId(0),
+        },
+        body: vec![],
+    };
+    agent.push(handshake_message);
     loop {
         if let Some(request) = agent.pop() {
             let response: Message = handle_request(agent_id, request);
@@ -40,8 +52,10 @@ async fn main_a() {
 
 fn handle_request(agent_id: AgentId, request: Message) -> Message {
     let body = format!(
-        "I got request: {}, from: {}",
-        request.header.request_id.0, request.header.src_agent_id.0
+        "I got request: {}, from: {}, with body: {}",
+        request.header.request_id.0,
+        request.header.src_agent_id.0,
+        String::from_utf8_lossy(&request.body)
     );
     Message {
         header: MessageHeader {
